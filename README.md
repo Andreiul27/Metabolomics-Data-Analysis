@@ -15,7 +15,7 @@ The analysis, in order, covers:
    - per patient, across all features
    - per feature, including log2 fold change and -log10(p-value) for downstream volcano plotting
 5. **Volcano plot** — interactive (Plotly) scatter plot of log2 fold change vs. -log10(p-value), flagging features as significant at p ≤ 0.05 and |log2FC| > 1.
-6. **Boxplots / violin plots** — per-feature distribution plots for significant features (disabled by default — see [Notes](#notes)).
+6. **Boxplots / violin plots** — per-feature distribution plots for significant features (disabled by default check [Notes](#notes)).
 7. **Unsupervised clustering** — k-means clustering of features across patients, with and without a high-intensity outlier feature excluded.
 8. **PCA** — principal component analysis of samples, run both with and without the pooled QC (PQC) samples included, visualized with `factoextra`/Plotly.
 
