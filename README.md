@@ -2,8 +2,7 @@
 
 An R Markdown pipeline for analyzing an untargeted LC-MS metabolomics dataset across three experimental/treatment groups, with paired statistical testing, volcano plots, exploratory clustering, and PCA (with and without pooled QC samples).
 
-The script currently runs on a **simulated dataset** (generated in-script) so it can be shared and tested without exposing real patient data. Swap in your real feature table by updating the `path` variable in the first code chunk — see [Data input](#data-input) below.
-
+The script currently runs on a **simulated dataset** (generated in-script) so it can be shared and tested without exposing real patient data. 
 ## Workflow
 
 The analysis, in order, covers:
@@ -42,11 +41,7 @@ The script expects an Excel feature table with:
 - Sample columns named `<patient_number>_<group_number>` (e.g. `1_1`, `1_2`, `1_3`, `2_1`, ...) for 20 patients × 3 groups
 - QC columns named `QC_<n>` for pooled QC injections
 
-Place your real feature table locally (it is **not** included in this repo) and update the `path` variable at the top of the script:
 
-```r
-path <- "data/your_feature_table.xlsx"
-```
 
 Then comment out or remove the "Simulate the data" chunk to use your real import instead of the synthetic dataset.
 
