@@ -1,0 +1,949 @@
+---
+title: "Untargeted Metabolomics Group Comparison Analysis"
+output: html_document
+date: "2024-09-11"
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE)
+```
+
+## Starting with importing and packages
+
+```{r message=FALSE, warning=FALSE}
+library(readxl) #for importing
+library(reshape2)# transform
+library(dplyr)# for mutate
+library(ggplot2)# For PCA visualization 
+library(ggfortify)# For PCA
+library(tidyr) #manipulations
+#library(MetaboAnalystR)### for metabolomics data not using 
+library(purrr) #for row manipulaton
+library(broom) #for manipulation
+library(RColorBrewer) #for colorblind colors 
+library(plotly) #interactive plots 
+library(factoextra) #clustering
+library(corrplot) # correlation
+library(tidyverse)
+library(viridis) #more colors
+#library(h2o) #ML PCA
+
+# --- Set the path to your exported feature table here ---
+# Update this to point to your local file before knitting.
+# Expected format: an .xlsx feature table exported from your LC-MS
+# processing software (e.g. Compound Discoverer), with columns for
+# ID, m/z, RT [min], Blank, sample intensities, and QC columns.
+path <- "data/your_feature_table.xlsx"
+data <- read_excel(path)
+```
+
+
+# Simulate the data 
+```{r}
+# Load necessary library
+library(dplyr)
+
+# Set the number of rows
+n_rows <- 1196  # From 1001 to 2196
+
+# Generate data
+set.seed(123)  # For reproducibility
+data <- data.frame(
+  ID = 1001:(1001 + n_rows - 1),
+  m_z = runif(n_rows, 100, 300),
+  RT_min = runif(n_rows, 0.5, 3.0),
+  Blank = runif(n_rows, 1, 10)
+)
+
+# Generate sample measurement columns
+for (i in 1:20) {
+  for (j in 1:3) {
+    data[[paste0(i, "_", j)]] <- runif(n_rows, 1, 10)
+  }
+}
+
+# Generate QC columns
+for (k in 1:14) {
+  data[[paste0("QC_", k)]] <- runif(n_rows, 1, 15)
+}
+
+# View the first few rows of the DataFrame
+head(data)
+```
+
+
+## Reshape data
+
+```{r}
+# Transforming the data from wide to long
+long_data <- melt(data, id.vars = c("ID", "m/z", "RT [min]", "Blank", colnames(data)[65:78]),
+                  variable.name = "Sample", 
+                  value.name = "Peak_Area") 
+
+# Split the 'Sample' column into 'Patient' and 'Group' using string manipulation
+long_data <- long_data %>%
+  mutate(Patient = paste0("Patient", sub("_.*", "", Sample)),   # Extract Patient number
+         Group = paste0("Group", sub(".*_", "", Sample)))       # Extract Group number
+
+#Reorder data, and getting rid of the former columns 
+long_data <- long_data[, c(1, 2, 3, 21, 22, 4, 5:ncol(long_data))]
+long_data <- long_data[, -c(24, 23, 21)] 
+
+```
+
+## Duplicate check
+```{r}
+#This is a function that checks for the duplicates, you use it as check_duplicates_dataframe(long_data) 
+#If it returns FALSE, there are no duplicates in the data, or TRUE, there are. 
+check_duplicates_dataframe <- function(df) {
+  # Ensure the input is a dataframe
+  if (!is.data.frame(df)) {
+    stop("Input must be a dataframe.")
+  }
+  
+  # Identify duplicate rows by comparing lengths
+  unique_rows <- unique(df)
+  is_duplicate <- nrow(df) != nrow(unique_rows)
+  
+  return(is_duplicate)
+}
+
+check_duplicates_dataframe(long_data) #No duplicates
+
+```
+
+## T-tests
+```{r}
+
+
+# Make the group_means column based on groupping of ID and Group, calculating their means 
+group_means <- long_data %>%
+  group_by(ID, Group) %>%
+  summarize(
+    count = n(),
+    mean_peak_area = gsub("\\.", "", as.numeric(mean(Peak_Area, na.rm = TRUE))),
+    .groups = 'drop'
+  ) %>%
+    select(-count) %>%
+    pivot_wider(
+    names_from = Group,
+    values_from = mean_peak_area,
+  ) %>% 
+   rename_with(tolower) %>%
+   mutate(across(starts_with("group"), as.numeric))
+  
+options(scipen = 999) # to have the values without scientifical notation 
+
+
+perform_t_tests_group <- function(data) {
+  # Combine the data into one vector for each group
+  group1_data <- data$group1
+  group2_data <- data$group2
+  group3_data <- data$group3
+  
+  # Perform t-tests
+  t_test_group1_vs_group2 <- t.test(group1_data, group2_data, paired = TRUE) 
+  t_test_group1_vs_group3 <- t.test(group1_data, group3_data, paired = TRUE)
+  t_test_group2_vs_group3 <- t.test(group2_data, group3_data, paired = TRUE)
+  
+  # Extract p-values
+  p_value_group1_vs_group2 <- tidy(t_test_group1_vs_group2)$p.value
+  p_value_group1_vs_group3 <- tidy(t_test_group1_vs_group3)$p.value
+  p_value_group2_vs_group3 <- tidy(t_test_group2_vs_group3)$p.value
+  
+  # Combine p-values into a data frame
+  p_values <- data.frame(
+    comparison = c("group1_vs_group2", "group1_vs_group3", "group2_vs_group3"),
+    p_value = c(p_value_group1_vs_group2, p_value_group1_vs_group3, p_value_group2_vs_group3)
+  )
+  
+  # Apply Benjamini-Hochberg correction
+  p_values$adjusted_p_value <- p.adjust(p_values$p_value, method = "BH")
+  
+  return(p_values)
+}
+
+
+# Apply the function to the data
+t_test_results_group <- perform_t_tests_group(group_means)
+
+# Print the results of
+print(t_test_results_group)
+```
+
+
+## T test for each patient with the same ID from different sample 
+```{r}
+
+perform_t_tests_by_patient <- function(long_data) {
+  # Initialize a data frame to store results
+  results <- data.frame()
+
+  # Loop through each patient
+  for (patient in paste0("Patient", 1:20)) {
+    # Filter data for the current patient
+    patient_data <- long_data %>% filter(Patient == patient)
+    
+    # Split data by group
+    group1_data <- patient_data %>% filter(Group == "Group1") %>% pull(Peak_Area)
+    group2_data <- patient_data %>% filter(Group == "Group2") %>% pull(Peak_Area)
+    group3_data <- patient_data %>% filter(Group == "Group3") %>% pull(Peak_Area)
+
+    # Skip if any group has no data
+    if (length(group1_data) == 0 || length(group2_data) == 0 || length(group3_data) == 0) {
+      next
+    }
+
+    
+    # Perform t-tests
+    
+      #If the  data is paired or dependent e.g., same individual measured twice, keep the argument TRUE , if not and data is independent e.g., different individuals in two groups change it to FALSE
+    
+    t_test_group1_vs_group2 <- t.test(group1_data, group2_data, paired = TRUE)
+    t_test_group1_vs_group3 <- t.test(group1_data, group3_data, paired = TRUE)
+    t_test_group2_vs_group3 <- t.test(group2_data, group3_data, paired = TRUE)
+
+    # Store results
+    results <- rbind(results, data.frame(
+      Patient = patient,
+      comparison = "group1_vs_group2",
+      p_value = t_test_group1_vs_group2$p.value
+    ))
+    
+    results <- rbind(results, data.frame(
+      Patient = patient,
+      comparison = "group1_vs_group3",
+      p_value = t_test_group1_vs_group3$p.value
+    ))
+    
+    results <- rbind(results, data.frame(
+      Patient = patient,
+      comparison = "group2_vs_group3",
+      p_value = t_test_group2_vs_group3$p.value
+    ))
+  }
+  
+  # Apply Benjamini-Hochberg correction
+  results$adjusted_p_value <- p.adjust(results$p_value, method = "BH")
+
+  return(results)
+}
+
+
+results_by_patient <- perform_t_tests_by_patient(long_data) # t test performed by means of all patients1 all ID vs the others 
+print(results_by_patient)
+
+
+
+```
+
+
+## T test and log2fold and -Logpvalue
+```{r}
+
+
+perform_t_tests_and_log2fc <- function(long_data) {
+  # Initialize a data frame to store results
+  results <- data.frame()
+
+  # Loop through each unique ID
+  for (id in unique(long_data$ID)) {
+    # Filter data for the current ID
+    id_data <- long_data %>% filter(ID == id)
+    
+    # Split data by group
+    group1_data <- id_data %>% filter(Group == "Group1") %>% pull(Peak_Area)
+    group2_data <- id_data %>% filter(Group == "Group2") %>% pull(Peak_Area)
+    group3_data <- id_data %>% filter(Group == "Group3") %>% pull(Peak_Area)
+
+    # Check if groups have enough data
+    if (length(group1_data) < 2 || length(group2_data) < 2 || length(group3_data) < 2) {
+      next  # Skip this ID if any group has fewer than 2 observations
+    }
+
+    # Calculate means for log2FC
+    mean_group1 <- mean(group1_data)
+    mean_group2 <- mean(group2_data)
+    mean_group3 <- mean(group3_data)
+
+    
+    # Perform t-tests
+    
+      
+  #If the  data is paired or dependent e.g., same individual measured twice, keep the argument TRUE , if not and data is independent e.g., different individuals in two groups change it to FALSE
+    
+    t_test_group1_vs_group2 <- t.test(group1_data, group2_data, paired = TRUE)
+    t_test_group1_vs_group3 <- t.test(group1_data, group3_data, paired = TRUE)
+    t_test_group2_vs_group3 <- t.test(group2_data, group3_data, paired = TRUE)
+
+    # Store results
+    results <- rbind(results, data.frame(
+      ID = id,
+      comparison = "group1_vs_group2",
+      p_value = t_test_group1_vs_group2$p.value,
+      log2FC = log2(mean_group1 / mean_group2),
+      neg_log10_p_value = -log10(t_test_group1_vs_group2$p.value)
+    ))
+
+    results <- rbind(results, data.frame(
+      ID = id,
+      comparison = "group1_vs_group3",
+      p_value = t_test_group1_vs_group3$p.value,
+      log2FC = log2(mean_group1 / mean_group3),
+      neg_log10_p_value = -log10(t_test_group1_vs_group3$p.value)
+    ))
+
+    results <- rbind(results, data.frame(
+      ID = id,
+      comparison = "group2_vs_group3",
+      p_value = t_test_group2_vs_group3$p.value,
+      log2FC = log2(mean_group2 / mean_group3),
+      neg_log10_p_value = -log10(t_test_group2_vs_group3$p.value)
+    ))
+  }
+
+  # Adjust p-values using Benjamini-Hochberg method
+  results$adjusted_p_value <- p.adjust(results$p_value, method = "BH")
+  results$adjusted_neg_log10_p_value <- -log10(results$adjusted_p_value)
+
+  return(results)
+}
+
+t_test_and_log2fc <- perform_t_tests_and_log2fc(long_data) #apply the function 
+
+
+## bind it with RT min and m/z 
+
+selected_columns <- long_data %>%
+    select(ID, `m/z`, `RT [min]`) %>%
+    distinct()  # Ensure unique rows for joining
+
+#add the ID 
+t_test_and_log2fc <- t_test_and_log2fc %>% # Join by ID 
+    left_join(selected_columns, by = "ID")
+
+```
+
+
+## Here I just show the colors and the pallets we can have for the plots. 
+```{r}
+
+display.brewer.all() #check the whole pallets of colorblind colors 
+display.brewer.pal(n = 11, name = "Spectral") #You can change the name to Set1 for example and you will see the other palette. 
+# I like the spectral one, so I will get 2 color codes red and blue from this palette. 
+brewer.pal(n = 11, name = "Spectral")# Need the color code to add it into the plot. We will get  #D53E4F and #3288BD
+```
+
+## Scatter plot - Vulcano Plot based on X Log2Fold Change and Y  -Log10P-value 
+```{r}
+
+# Create a new column for color categories that matches the rules 
+t_test_and_log2fc <- t_test_and_log2fc %>%
+  mutate(color_category = ifelse(p_value <= 0.05 & (log2FC > 1 | log2FC < -1), "Significant", "Not Significant"))    #Make a new column named color_category 
+
+
+## Interactive plot 
+Scatter <- ggplot(t_test_and_log2fc, aes(x = log2FC, y = neg_log10_p_value, color = color_category)) +
+  geom_point(size = 3, alpha = 0.6, aes(text = paste("Log2 FC:", log2FC, "<br>-Log10 P-Value:", neg_log10_p_value))) +  # Add tooltip text
+  labs(
+    title = "Scatter Plot of Log2 Fold Change vs -Log10 P-Value",
+    x = "Log2 Fold Change",
+    y = "-Log10 P-Value",
+    color = "Category"
+  ) +
+  scale_color_manual(values = c("Significant" = "#D53E4F", "Not Significant" = "#3288BD")) +
+  geom_hline(yintercept = 0, color = "black", linewidth = 0.5) +
+  geom_vline(xintercept = 0, color = "black", linewidth = 0.5) +
+  theme_minimal(base_size = 15) +
+  theme(
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.background = element_rect(fill = "white")
+  )
+
+# Convert ggplot to an interactive plotly plot
+interactive_plot_scatter <- ggplotly(Scatter, tooltip = c("text"))  # Use 'text' for tooltips
+
+#Visualize it # you can click on the dots to see the actual values, or see only significant or non significant values etc 
+interactive_plot_scatter
+
+```
+
+
+
+# Some data manipulations before starting the Boxplots and Violin plots
+```{r}
+
+# Make new DF with Unique ID and Significant color 
+
+unique_ids <- t_test_and_log2fc %>%
+  filter(color_category == "Significant") %>%
+  distinct(ID)  # Extract only the unique IDs
+
+# Display the unique IDs
+#unique_ids #So we know that only those samples with those ID are significant within the long_data frame 
+
+filtered_long_data <- long_data %>%
+  filter(ID %in% unique_ids$ID)
+
+filtered_long_data$Group <- as.factor(filtered_long_data$Group) #factor for box plots 
+
+filtered_long_data <- filtered_long_data %>%
+  mutate(Group = gsub("Group(\\d+)", "Group \\1", Group))  # Replace "Group1" with "Group 1" the same for the others 
+
+
+```
+
+## Create boxplots and violin plots for the significant samples ID 
+```{r}
+# Remove the # from the chunk, I added it to not have all the times the plots computed and saved
+# Boxplot and Violin plot for Sample ID
+# ```{r}
+# 
+# ids <- c(1002, 1062, 1165, 1166, 1225, 1230, 1254, 1301, 1354,
+#          1436, 1437, 1459, 1505, 1506, 1659, 1778, 1779,
+#          2149, 2155, 2214, 2330, 2343, 2555, 2652, 2653,
+#          2707)
+# 
+# # Loop through each ID to create boxplots and violin plots
+# for (id in ids) {
+#   # Boxplot
+#   boxplot_code <- ggplot(filtered_long_data %>% filter(ID == id),
+#                           aes(x = Group, y = Peak_Area, fill = Group)) +
+#     geom_boxplot(outlier.shape = 100) +
+#     scale_fill_manual(values = c("#5E4FA2", "#9E0142", "#FEE08B")) +
+#     labs(title = paste("Boxplot of Sample ID", id),
+#          x = "",
+#          y = "Peak Area") +
+#     theme_minimal() +
+#     theme(
+#       plot.title = element_text(hjust = 0.5, size = 18, face = "bold"),
+#       axis.title.y = element_text(face = "bold"),
+#       axis.text.y = element_text(size = 12, face = "bold"),
+#       axis.text.x = element_text(size = 13, face = "bold"),
+#       panel.grid.major = element_blank(),
+#       panel.grid.minor = element_blank()
+#     )
+# 
+#   # Convert to interactive plot
+#   interactive_boxplot <- ggplotly(boxplot_code, tooltip = c("y", "x", "Group"))
+# 
+#   # Save boxplot as HTML
+#   htmlwidgets::saveWidget(interactive_boxplot, file = paste0("boxplot_ID_", id, ".html"), selfcontained = TRUE)
+# 
+#   # Violin plot
+#   violin_plot_code <- ggplot(filtered_long_data %>% filter(ID == id),
+#                               aes(x = Group, y = Peak_Area, fill = Group)) +
+#     geom_violin(trim = TRUE) +
+#     scale_fill_manual(values = c("#5E4FA2", "#9E0142", "#FEE08B")) +
+#     labs(title = paste("Violin Plot of Sample ID", id),
+#          x = "",
+#          y = "Peak Area") +
+#     theme_minimal() +
+#     theme(
+#       plot.title = element_text(hjust = 0.5, size = 18, face = "bold"),
+#       axis.title.y = element_text(face = "bold"),
+#       axis.text.y = element_text(size = 12, face = "bold"),
+#       axis.text.x = element_text(size = 13, face = "bold"),
+#       panel.grid.major = element_blank(),
+#       panel.grid.minor = element_blank()
+#     )
+# 
+#   # Convert to interactive plot
+#   interactive_violin_plot <- ggplotly(violin_plot_code, tooltip = c("y", "x", "Group"))
+# 
+#   # Save violin plot as HTML
+#   #htmlwidgets::saveWidget(interactive_violin_plot, file = paste0("violin_plot_ID_", id, ".html"), selfcontained = TRUE) # I COMMENTED IT SO NOT FORCE R TO SAVE THEM EVERYTIME, SINCE IT IS TIME CONSUMING
+# }
+
+
+```
+
+## Some extra codes to check the max and lowest values of Peak area based on patient and group 
+```{r}
+
+ filtered_long_data %>%
+  filter(ID == 1166) %>%  # Filter for the specific ID, we can replace it with anything 
+  group_by(Group) %>%    # Group by the Group variable
+  summarise(
+    max_value = max(Peak_Area, na.rm = TRUE),
+    max_patient = Patient[which.max(Peak_Area)],
+    min_value = min(Peak_Area, na.rm = TRUE),
+    min_patient = Patient[which.min(Peak_Area)],
+    .groups = 'drop'      # Drop grouping after summarising
+  )
+
+```
+
+
+## Transformation for clustering 
+```{r}
+
+#or just have 3 big groups based on patient id 
+wide_data_1 <- long_data %>%
+  group_by(ID,Group, Patient) %>%                         # Group by ID and Group and Patient 
+  summarise(Peak_Area = mean(Peak_Area, na.rm = TRUE)) %>%  
+  ungroup() %>%
+  pivot_wider(names_from = Group, values_from = Peak_Area) #make it wide 
+
+
+#having 20 columns for each Patient
+wide_data <- long_data %>%
+  group_by(ID,Group, Patient, `m/z`, `RT [min]` ) %>%   # Group by ID and Group and Patient 
+  summarise(Peak_Area = mean(Peak_Area, na.rm = TRUE)) %>%  
+  ungroup() %>%
+  pivot_wider(names_from = Patient, values_from = Peak_Area) #make it wide 
+
+
+
+```
+
+
+#Unsupervised clustering analysis with K means 
+```{r}
+
+#scale 
+#scaled_data <- wide_data_1 %>%
+  #select(-ID, -Patient) %>%
+  #scale()
+
+scaled_data_2 <-wide_data %>% select(-ID, -Group) %>% scale() #data with the patient spread as each Column 
+
+
+num_clusters <- 5 #change it here to edit the number of clusters 
+
+#kmeans_result <- kmeans(scaled_data, centers = num_clusters, nstart = 50)
+
+
+#wide_data_1$Cluster <- as.factor(kmeans_result$cluster)
+
+# Visualize K-means clustering results
+#fviz_cluster(kmeans_result, data = scaled_data,
+             #geom = "point", ellipse.type = "convex") +
+  #labs(title = "K-means Clustering of Patients")
+
+
+
+
+kmeans_result_2 <- kmeans(scaled_data_2, centers = num_clusters, nstart = 50)
+
+wide_data$Cluster <- as.factor(kmeans_result_2$cluster)
+
+
+# Visualize K-means clustering results
+fviz_cluster(kmeans_result_2, data = scaled_data_2,
+             geom = "point", ellipse.type = "convex") +
+  labs(title = "K-means Clustering of Patients")
+
+
+#z<-wide_data_1 %>% filter(Cluster ==1) #highest k means, when we have separate patients in the cluster 3 
+
+zdd<-wide_data %>% filter(Cluster ==5) #ID 2284 Highest peak 
+
+```
+
+
+
+## Clustering without ID 2284
+```{r}
+
+data_without_2284<- filter(wide_data, ID !=2284)
+
+wide_data_without2284<-filter(wide_data_1, ID !=2284)
+
+
+scaled_data_without_2284 <-data_without_2284 %>% select(-ID, -Group, -Cluster)  %>% scale()
+
+num_clusters_data_without_2284 <- 5 #change it here to edit the number of clusters 
+
+kmeans_result_2 <- kmeans(scaled_data_without_2284, centers = num_clusters, nstart = 50)
+
+
+scaled_data_without_2284$Cluster <- as.factor(kmeans_result_2$cluster)
+
+# Visualize K-means clustering results
+fviz_cluster(kmeans_result_2, data = scaled_data_without_2284,
+             geom = "point", ellipse.type = "convex") +
+  labs(title = "K-means Clustering of Patients")
+
+
+```
+
+
+## Data visualization for EDTA 
+```{r}
+
+idd<-2284
+boxplot_2284 <- ggplot(long_data%>% filter(ID == 2284), 
+                          aes(x = Group, y = Peak_Area, fill = Group)) +
+    geom_boxplot(outlier.shape = 100) +
+    scale_fill_manual(values = c("#5E4FA2", "#9E0142", "#FEE08B")) +
+    labs(title = paste("Boxplot of Sample ID", idd),
+         x = "",
+         y = "Peak Area") +
+    theme_minimal() +
+    theme(
+      plot.title = element_text(hjust = 0.5, size = 18, face = "bold"),
+      axis.title.y = element_text(face = "bold"),
+      axis.text.y = element_text(size = 12, face = "bold"),
+      axis.text.x = element_text(size = 13, face = "bold"),
+      panel.grid.major = element_blank(),
+      panel.grid.minor = element_blank()
+    )
+
+
+interactive_boxplot_2284 <- ggplotly(boxplot_2284, tooltip = c("y", "x", "Group"))
+
+  # Violin plot
+  violin_plot_2284 <- ggplot(long_data %>% filter(ID == 2284), 
+                              aes(x = Group, y = Peak_Area, fill = Group)) +
+    geom_violin(trim = TRUE) +
+    scale_fill_manual(values = c("#5E4FA2", "#9E0142", "#FEE08B")) +
+    labs(title = paste("Violin Plot of Sample ID", idd),
+         x = "",
+         y = "Peak Area") +
+    theme_minimal() +
+    theme(
+      plot.title = element_text(hjust = 0.5, size = 18, face = "bold"),
+      axis.title.y = element_text(face = "bold"),
+      axis.text.y = element_text(size = 12, face = "bold"),
+      axis.text.x = element_text(size = 13, face = "bold"),
+      panel.grid.major = element_blank(),
+      panel.grid.minor = element_blank()
+    )
+
+  # Convert to interactive plot
+  interactive_violin_2284 <- ggplotly(violin_plot_2284, tooltip = c("y", "x", "Group"))
+
+
+interactive_violin_2284 
+
+
+ long_data %>%
+  filter(ID == 2284) %>%  # Filter for the specific ID, we can replace it with anything 
+  group_by(Group) %>%    # Group by the Group variable
+  summarise(
+    max_value = max(Peak_Area, na.rm = TRUE),
+    max_patient = Patient[which.max(Peak_Area)],
+    min_value = min(Peak_Area, na.rm = TRUE),
+    min_patient = Patient[which.min(Peak_Area)],
+    .groups = 'drop'      # Drop grouping after summarising
+  )
+```
+
+## Scatter Plots based on ID, Group and 20 patients (X axe m/z and Y axe Peak Area) DO NOT UNCOMMENT IT!!!
+## IT TAKES 3 H TO PROCESS EVERYTHING OR CAN TAKE EVEN MORE IF WE GOT MORE SAMPLE ID  
+```{r}
+
+# unique_ids <- unique(wide_data$ID)  # Adjust based on your actual data frame structure 
+#
+# Define the groups 
+# groups <- c("Group1", "Group2", "Group3") 
+
+# Function to create plots for a specific ID and group 
+# create_plot_for_id_and_group <- function(id, group) { 
+#   filtered_data_2 <- wide_data %>% 
+#    filter(ID == id, Group == group) %>%  # Filter by both ID and Group 
+#     pivot_longer(cols = starts_with("Patient"),  # Adjust this to your patient column names 
+#                  names_to = "Patient", 
+#                  values_to = "Peak_Area") %>% 
+#     mutate(Patient = factor(Patient, levels = paste0("Patient", 1:20)))  # Reorder levels 
+# 
+#   # Generate distinct colors (ensuring they are more distinct) 
+#   colors <- c( -->
+#     brewer.pal(8, "Dark2"), 
+#     brewer.pal(8, "Set1"), 
+#     brewer.pal(12, "Set3")[1:4] 
+#   ) 
+#   extra_colors <- c("#E41A1C", "#377EB8", "#4DAF4A", "#000000", "#FFFF33", "#A65628", "#984EA3", "#999999")
+#   colors <- unique(c(colors, extra_colors)) 
+#   colors <- colors[1:20]  # Select the first 20 distinct colors 
+# 
+#   # Create ggplot 
+#   p <- ggplot(filtered_data_2, aes(x = `m/z`, y = Peak_Area, fill = Patient)) + 
+#     geom_point(aes(color = Patient), size = 2) +  # Scatter plot points 
+#     labs(title = paste("Scatter Plot for ID:", id, "- Group:", group), 
+#          x = "m/z", 
+#          y = "Peak Area", 
+#          color = "Patients", 
+#          fill = "Patients") + 
+#     theme_minimal() + -->
+#     scale_fill_manual(values = colors) +  # Apply custom colors for fill 
+#     scale_color_manual(values = colors) +  # Apply custom colors for points 
+#     theme( -->
+#       plot.title = element_text(hjust = 0.5, face = "bold"),  # Center and bold title 
+#       axis.title.x = element_text(face = "bold"),  # Bold x-axis title 
+#       axis.title.y = element_text(face = "bold"),  # Bold y-axis title 
+#       legend.title = element_text(size = 10) 
+#     ) 
+# 
+#   # Convert to interactive plot 
+#   interactive_plot <- ggplotly(p, tooltip = c("y", "x", "Patient")) -->
+# 
+  # Save interactive plot as HTML 
+#   htmlwidgets::saveWidget(interactive_plot, file = paste0("scatter_plot_ID_", id, "_", group, ".html"), selfcontained = TRUE) 
+# 
+#   return(interactive_plot)  # Return the interactive plot if needed 
+# } 
+# 
+# # Create plots for each unique ID and each group 
+# m_zplots <- list()  # Initialize a list to store plots 
+# for (id in unique_ids) { 
+#   for (group in groups) { 
+#     m_zplots[[paste(id, group, sep = "_")]] <- create_plot_for_id_and_group(id, group) 
+#   } 
+# } 
+# 
+# # Display the plots (optional) 
+# for (plot_name in names(m_zplots)) { 
+#   print(m_zplots[[plot_name]])  # Display each plot for each unique ID and group 
+# } 
+  
+```
+
+
+
+## Scatter Plots based on ID, Group and 20 patients (X axe RT MIN and Y axe Peak Area) 
+```{r}
+
+#  unique_ids <- unique(wide_data$ID)  # Adjust based on your actual data frame structure 
+# 
+# # Define the groups 
+#  groups <- c("Group1", "Group2", "Group3") 
+# 
+# # Function to create plots for a specific ID and group 
+# create_plot_for_id_and_group <- function(id, group) { 
+#   filtered_data_2 <- wide_data %>% 
+#     filter(ID == id, Group == group) %>%  # Filter by both ID and Group 
+#     pivot_longer(cols = starts_with("Patient"),  # Adjust this to your patient column names 
+#                  names_to = "Patient", 
+#                  values_to = "Peak_Area") %>% 
+#     mutate(Patient = factor(Patient, levels = paste0("Patient", 1:20)))  # Reorder levels 
+# 
+#   # Generate distinct colors (ensuring they are more distinct) 
+#   colors <- c(
+#     brewer.pal(8, "Dark2"), 
+#     brewer.pal(8, "Set1"), 
+#     brewer.pal(12, "Set3")[1:4] 
+#   ) 
+#   extra_colors <- c("#E41A1C", "#377EB8", "#4DAF4A", "#000000", "#FFFF33", "#A65628", "#984EA3", "#999999")
+#   colors <- unique(c(colors, extra_colors)) 
+#   colors <- colors[1:20]  # Select the first 20 distinct colors 
+# 
+#   # Create ggplot 
+#   p <- ggplot(filtered_data_2, aes(x = `RT [min]`, y = Peak_Area, fill = Patient)) + 
+#     geom_point(aes(color = Patient), size = 2) +  # Scatter plot points 
+#     labs(title = paste("Scatter Plot for ID:", id, "- Group:", group), 
+#          x = "RT [min]", 
+#          y = "Peak Area", 
+#          color = "Patients", 
+#          fill = "Patients") + 
+#     theme_minimal() + 
+#     scale_fill_manual(values = colors) +  # Apply custom colors for fill 
+#     scale_color_manual(values = colors) +  # Apply custom colors for points 
+#     theme( 
+#       plot.title = element_text(hjust = 0.5, face = "bold"),  # Center and bold title 
+#       axis.title.x = element_text(face = "bold"),  # Bold x-axis title 
+#       axis.title.y = element_text(face = "bold"),  # Bold y-axis title 
+#       legend.title = element_text(size = 10) 
+#     ) 
+# 
+#   # Convert to interactive plot 
+#   interactive_plot <- ggplotly(p, tooltip = c("y", "x", "Patient")) 
+# 
+#   # Save interactive plot as HTML 
+#   htmlwidgets::saveWidget(interactive_plot, file = paste0("scatter_plot_ID_", id, "_", group, ".html"), selfcontained = TRUE) 
+# 
+#   return(interactive_plot)  # Return the interactive plot if needed 
+# } 
+# 
+#  # Create plots for each unique ID and each group 
+#  m_zplots <- list()  # Initialize a list to store plots 
+#  for (id in unique_ids) { 
+#    for (group in groups) { 
+#      m_zplots[[paste(id, group, sep = "_")]] <- create_plot_for_id_and_group(id, group) 
+#    } 
+#  } 
+  
+```
+
+## PCA Attempt based on onl
+```{r}
+
+
+# Keep the original data "data" Remove everything except the patients (so we will have 60 columns)
+
+
+colnames(data) <- gsub("QC_([1-9]|1[0-4])", "PQC\\1", gsub("([0-9]+)_([0-9]+)", "Patient\\1_Group\\2", colnames(data))) #rename 
+
+
+PCA_data <- data %>%
+  select(matches("Patient|Group"))
+
+PCA_transposed <- t(PCA_data) |> as.data.frame() |> rownames_to_column(var="ID")
+
+
+
+PCA_scaled_data <- PCA_transposed %>%
+  select(-ID) %>%  # Remove the ID column
+  mutate(across(everything(), ~ {
+    # Log transform and scale, handling NA values
+    log_transformed <- log10(. + 1)  # Log transformation
+    scaled_value <- scale(log_transformed, center = TRUE, scale = TRUE)  # Centering and scaling
+    return(scaled_value)  # Return the scaled value
+  }))
+
+PCA_scaled_data<-as.matrix(PCA_scaled_data) #make it matrix 
+
+#Perform PCA and extract eigenvalues and eigenvectors
+pca_result <- prcomp(PCA_scaled_data)
+eigenvalues <- pca_result$sdev^2
+eigenvectors <- pca_result$rotation
+
+#  Sort the eigenvalues
+sorted_indices <- order(eigenvalues, decreasing = TRUE)
+sorted_eigenvalues <- eigenvalues[sorted_indices]
+sorted_eigenvectors <- eigenvectors[, sorted_indices]
+
+
+# Assuming you want to retain 95% of the variance
+cumulative_variance <- cumsum(sorted_eigenvalues) / sum(sorted_eigenvalues)
+num_components <- which.max(cumulative_variance >= 0.95)
+
+projected_data <- as.data.frame(PCA_scaled_data %*% sorted_eigenvectors[, 1:num_components])
+
+
+group<-PCA_transposed$ID  #Our group is the ID variable (that became the patients )
+
+
+
+ordered_groups <- paste0("Patient", rep(1:20, each = 3), "_Group", 1:3)
+
+# Ensure the group variable is a factor with the correct levels
+group <- factor(group, levels = ordered_groups)
+
+# Generate a color palette with enough colors for each unique group
+colors <- viridis(length(levels(group)))  # Generate a palette with unique colors
+patient_colors <- setNames(colors, levels(group))  # Name the colors according to group levels
+
+# Create the PCA plot
+pca_plot <- fviz_pca_ind(pca_result,
+                          geom.ind = "point",
+                          col.ind = group,
+                          pointshape = 21,
+                          fill.ind = "white",
+                          addEllipses = TRUE,
+                          legend.title = "Patient_Group") +
+  scale_color_manual(values = patient_colors) +
+  ggtitle("Principal Component Analysis") +  # Set the title
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold"),  # Center title and make it bold
+    axis.title.x = element_text(face = "bold"),              # Make x-axis title bold
+    axis.title.y = element_text(face = "bold")               # Make y-axis title bold
+  )
+
+interactive_pca_plot <- ggplotly(pca_plot) #Interactive PCA plot 
+
+pca_plot 
+interactive_pca_plot
+
+```
+
+
+## PCA with PQC included
+```{r}
+
+PCA_data_PQC <- data %>%
+  select(matches("Patient|Group|PQC[1-9]|PQC1[0-4]"))
+
+
+PCA_transposed_PQC <- t(PCA_data_PQC) |> as.data.frame() |> rownames_to_column(var="ID")
+
+
+
+PCA_scaled_data_PQC <- PCA_transposed_PQC %>%
+  select(-ID) %>%  # Remove the ID column
+  mutate(across(everything(), ~ {
+    # Log transform and scale, handling NA values
+    log_transformed <- log10(. + 1)  # Log transformation
+    scaled_value <- scale(log_transformed, center = TRUE, scale = TRUE)  # Centering and scaling
+    return(scaled_value)  # Return the scaled value
+  }))
+
+
+PCA_scaled_data_PQC<-as.matrix(PCA_scaled_data_PQC) #make it matrix 
+
+#Perform PCA and extract eigenvalues and eigenvectors
+pca_result_PQC <- prcomp(PCA_scaled_data_PQC)
+eigenvalues_PQC <- pca_result_PQC$sdev^2
+eigenvectors_PQC <- pca_result_PQC$rotation
+
+#  Sort the eigenvalues
+sorted_indices_PQC <- order(eigenvalues_PQC, decreasing = TRUE)
+sorted_eigenvalues_PQC <- eigenvalues_PQC[sorted_indices_PQC]
+sorted_eigenvectors_PQC <- eigenvectors_PQC[, sorted_indices_PQC]
+
+
+# Assuming you want to retain 95% of the variance
+cumulative_variance_PQC <- cumsum(sorted_eigenvalues_PQC) / sum(sorted_eigenvalues_PQC)
+num_components_PQC <- which.max(cumulative_variance_PQC >= 0.95)
+
+projected_data_PQC <- as.data.frame(PCA_scaled_data_PQC %*% sorted_eigenvectors_PQC[, 1:num_components_PQC])
+
+
+group<-PCA_transposed_PQC$ID  #Our group is the ID variable (that became the patients )
+
+
+
+ordered_groups_PQC <- c(paste0("Patient", rep(1:20, each = 3), "_Group", 1:3), paste0("PQC", 1:14))
+
+# Ensure the group variable is a factor with the correct levels
+group_PQC <- factor(group, levels = ordered_groups_PQC)
+
+# Generate a color palette with enough colors for each unique group
+colors <- viridis(length(levels(group_PQC)))  # Generate a palette with unique colors
+patient_colors_PQC <- setNames(colors, levels(group_PQC))  # Name the colors according to group levels
+
+
+
+PCs <- pca_result_PQC$x[, 1:2]  %>% as.data.frame() # Extract PC1 and PC2
+colnames(PCs) <- c("PC1", "PC2")
+PCs<-as.data.frame(PCs)
+
+
+
+PCs$PC1<- PCs$PC1-23.269449 
+
+PCs$PC2<- PCs$PC2-3.671559 # Use the median 
+
+
+PCs<-as.matrix(PCs)
+
+pca_result_PQC$x[, 1] <-as.vector(PCs[, 1])
+
+pca_result_PQC$x[, 2] <-as.vector(PCs[, 2])
+
+
+# Create the PCA plot
+pca_plot_PQC <- fviz_pca_ind(pca_result_PQC,
+                          geom.ind = "point",
+                          col.ind = group,
+                          pointshape = 21,
+                          fill.ind = "white",
+                          addEllipses = TRUE,
+                          legend.title = "Patient_Group_PQC") +
+  scale_color_manual(values = patient_colors_PQC) +
+  ggtitle("Principal Component Analysis") +  # Set the title
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold"),  # Center title and make it bold
+    axis.title.x = element_text(face = "bold"),              # Make x-axis title bold
+    axis.title.y = element_text(face = "bold")               # Make y-axis title bold
+  )
+
+interactive_pca_plot_PQC <- ggplotly(pca_plot_PQC) #Interactive PCA plot 
+
+pca_plot_PQC 
+interactive_pca_plot_PQC
+```
