@@ -54,8 +54,8 @@ Then comment out or remove the "Simulate the data" chunk to use your real import
 ## Notes
 
 - Several chunks are intentionally commented out:
-  - The per-feature boxplot/violin loop (saves individual HTML widgets per significant feature)  uncomment to regenerate.
-  - The per-feature m/z and RT scatter plot loops — these are **not** meant to be run as-is; they can take several hours given the full feature set. Re-enable only if needed, and consider running on a subset first.
+  - The per-feature boxplot/violin loop (saves individual HTML widgets per significant feature)  you can uncomment to regenerate.
+  - The per-feature m/z and RT scatter plot loops are **not** meant to be run as is; they can take several hours given the full feature set. Re-enable only if needed, and consider running on a subset first.
 - `num_clusters` controls the number of k-means clusters and can be adjusted.
 - The PCA-with-QC section recenters PC1/PC2 using fixed offset values derived from a prior run on real data; revisit these if your dataset's variance structure differs substantially.
 
