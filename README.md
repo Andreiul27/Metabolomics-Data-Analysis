@@ -7,17 +7,17 @@ The script currently runs on a **simulated dataset** (generated in-script) so it
 
 The analysis, in order, covers:
 
-1. **Import** — reads an `.xlsx` feature table exported from LC-MS processing software.
-2. **Reshape** — converts the wide feature table (one row per feature, one column per sample) into long format, parsing sample column names into `Patient` and `Group` identifiers.
-3. **Duplicate check** — a small utility function to confirm no duplicate rows exist after reshaping.
-4. **Statistical testing** — paired t-tests (Group 1 vs 2, 1 vs 3, 2 vs 3) with Benjamini–Hochberg FDR correction, computed three ways:
+1. **Import** reads an `.xlsx` feature table exported from LC-MS processing software.
+2. **Reshape** converts the wide feature table (one row per feature, one column per sample) into long format, parsing sample column names into `Patient` and `Group` identifiers.
+3. **Duplicate check**  a small utility function to confirm no duplicate rows exist after reshaping.
+4. **Statistical testing**  paired t-tests (Group 1 vs 2, 1 vs 3, 2 vs 3) with Benjamini–Hochberg FDR correction, computed three ways:
    - on group-level means per feature
    - per patient, across all features
    - per feature, including log2 fold change and -log10(p-value) for downstream volcano plotting
-5. **Volcano plot** — interactive (Plotly) scatter plot of log2 fold change vs. -log10(p-value), flagging features as significant at p ≤ 0.05 and |log2FC| > 1.
-6. **Boxplots / violin plots** — per-feature distribution plots for significant features (disabled by default check [Notes](#notes)).
-7. **Unsupervised clustering** — k-means clustering of features across patients, with and without a high-intensity outlier feature excluded.
-8. **PCA** — principal component analysis of samples, run both with and without the pooled QC (PQC) samples included, visualized with `factoextra`/Plotly.
+5. **Volcano plot**  interactive (Plotly) scatter plot of log2 fold change vs. -log10(p-value), flagging features as significant at p ≤ 0.05 and |log2FC| > 1.
+6. **Boxplots / violin plots** per-feature distribution plots for significant features (disabled by default check [Notes](#notes)).
+7. **Unsupervised clustering** k-means clustering of features across patients, with and without a high-intensity outlier feature excluded.
+8. **PCA** principal component analysis of samples, run both with and without the pooled QC (PQC) samples included, visualized with `factoextra`/Plotly.
 
 ## Requirements
 
@@ -35,9 +35,9 @@ install.packages(c(
 
 The script expects an Excel feature table with:
 
-- `ID` — unique feature identifier
-- `m/z`, `RT [min]` — mass-to-charge ratio and retention time
-- `Blank` — blank sample intensity
+- `ID` unique feature identifier
+- `m/z`, `RT [min]`  mass-to-charge ratio and retention time
+- `Blank`  blank sample intensity
 - Sample columns named `<patient_number>_<group_number>` (e.g. `1_1`, `1_2`, `1_3`, `2_1`, ...) for 20 patients × 3 groups
 - QC columns named `QC_<n>` for pooled QC injections
 
